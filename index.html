@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Assistant Comptable IA</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #020817; }
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;600;700&display=swap');
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useCallback } = React;
+
+    const SYSTEM_PROMPT = `Tu es un expert-comptable français. Quand on te donne le contenu d'une facture, tu dois extraire les données et proposer les écritures comptables.
+
+Réponds UNIQUEMENT en JSON valide, sans aucun texte avant ou après, sans backticks, sans markdown.
+
+Format de réponse attendu :
+{
+  "fournisseur": "Nom du fournisseur",
+  "numero_facture": "FAC-XXXX",
+  "date": "JJ/MM/AAAA",
+  "devise": "EUR",
+  "montant_ht": 1000.00,
+  "tva": 200.00,
+  "montant_ttc": 1200.00,
+  "nature": "Description courte de la charge",
+  "ecritures": [
+    {
+      "compte": "606100",
+      "libelle": "Achat matériel informatique - NomFournisseur",
+      "debit": 1000.00,
+      "credit": 0
+    },
+    {
+      "compte": "445660",
+      "libelle": "TVA déductible sur autres biens",
+      "debit": 200.00,
+      "credit": 0
+    },
+    {
+      "compte": "401000",
+      "libelle": "Fournisseur NomFournisseur",
+      "debit": 0,
+      "credit": 1200.00
+    }
+  ],
+  "confiance": 95,
+  "remarques": "Éventuelles remarques ou alertes"
+}`;
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function formatAmount(n) {
+      if (n === undefined || n === null) return "—";
+      return Number(n).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+    }
+
+    function ConfidenceBadge({ value }) {
+      const color = value >= 85 ? "#22c55e" : value >= 60 ? "#f59e0b" : "#ef4444";
+      const label = value >= 85 ? "Haute" : value >= 60 ? "Moyenne" : "Faible";
+      return (
+        <span style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          background: color + "1a", border: `1px solid ${color}44`,
+          color, borderRadius: 20, padding: "3px 10px", fontSize: 12, fontWeight: 600
+        }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block" }} />
+          Confiance {label} ({value}%)
+        </span>
+      );
+    }
+
+    function Loader() {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "48px 0" }}>
+          <div style={{ position: "relative", width: 48, height: 48 }}>
+            <div style={{
+              position: "absolute", inset: 0, borderRadius: "50%",
+              border: "3px solid #1e293b", borderTopColor: "#6366f1",
+              animation: "spin 0.8s linear infinite"
+            }} />
+          </div>
+          <p style={{ color: "#94a3b8", fontSize: 14 }}>Analyse de la facture en cours…</p>
+        </div>
+      );
+    }
+
+    function DropZone({ onFile, file }) {
+      const inputRef = useRef();
+      const [drag, setDrag] = useState(false);
+
+      const handleDrop = useCallback((e) => {
+        e.preventDefault();
+        setDrag(false);
+        const f = e.dataTransfer.files[0];
+        if (f) onFile(f);
+      }, [onFile]);
+
+      return (
+        <div
+          onClick={() => inputRef.current.click()}
+          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={handleDrop}
+          style={{
+            border: `2px dashed ${drag ? "#6366f1" : "#334155"}`,
+            borderRadius: 16, padding: "40px 24px", textAlign: "center",
+            cursor: "pointer", transition: "all 0.2s",
+            background: drag ? "#6366f110" : "#0f172a",
+          }}
+        >
+          <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }}
+            onChange={(e) => e.target.files[0] && onFile(e.target.files[0])} />
+          <div style={{ fontSize: 36, marginBottom: 12 }}>📄</div>
+          {file ? (
+            <p style={{ color: "#a5b4fc", fontWeight: 600 }}>{file.name}</p>
+          ) : (
+            <>
+              <p style={{ color: "#e2e8f0", fontWeight: 600, marginBottom: 6 }}>Déposez votre facture ici</p>
+              <p style={{ color: "#64748b", fontSize: 13 }}>PDF ou image (JPG, PNG) • cliquez pour parcourir</p>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function ResultCard({ data }) {
+      const [copied, setCopied] = useState(false);
+      const [tab, setTab] = useState("ecritures");
+
+      const csvContent = [
+        ["Compte", "Libellé", "Débit", "Crédit"].join(";"),
+        ...data.ecritures.map(e => [e.compte, `"${e.libelle}"`, e.debit || "", e.credit || ""].join(";")),
+      ].join("\n");
+
+      const downloadCSV = () => {
+        const bom = "\uFEFF";
+        const blob = new Blob([bom + csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `ecritures_${data.numero_facture || "facture"}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const copyCSV = () => {
+        navigator.clipboard.writeText(csvContent);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      };
+
+      const tabs = [
+        { id: "ecritures", label: "Écritures" },
+        { id: "infos", label: "Infos facture" },
+        { id: "csv", label: "CSV brut" },
+      ];
+
+      return (
+        <div style={{
+          background: "#0f172a", borderRadius: 16, border: "1px solid #1e293b",
+          overflow: "hidden", marginTop: 24
+        }}>
+          <div style={{
+            padding: "20px 24px", background: "#1e293b",
+            display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12
+          }}>
+            <div>
+              <p style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>Facture analysée</p>
+              <h2 style={{ color: "#f1f5f9", fontSize: 20, fontWeight: 700, margin: 0 }}>{data.fournisseur}</h2>
+              <p style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>{data.numero_facture} · {data.date}</p>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <ConfidenceBadge value={data.confiance} />
+              <div style={{ marginTop: 8 }}>
+                <span style={{ color: "#94a3b8", fontSize: 13 }}>TTC : </span>
+                <span style={{ color: "#f1f5f9", fontSize: 22, fontWeight: 700 }}>{formatAmount(data.montant_ttc)}</span>
+              </div>
+              <p style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>HT {formatAmount(data.montant_ht)} · TVA {formatAmount(data.tva)}</p>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", borderBottom: "1px solid #1e293b" }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{
+                padding: "12px 20px", background: "none", border: "none",
+                borderBottom: tab === t.id ? "2px solid #6366f1" : "2px solid transparent",
+                color: tab === t.id ? "#a5b4fc" : "#64748b",
+                cursor: "pointer", fontSize: 13, fontWeight: 600
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          <div style={{ padding: 24 }}>
+            {tab === "ecritures" && (
+              <div>
+                <p style={{ color: "#475569", fontSize: 12, marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>{data.nature}</p>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr>
+                      {["Compte", "Libellé", "Débit", "Crédit"].map(h => (
+                        <th key={h} style={{
+                          padding: "8px 12px", textAlign: h === "Débit" || h === "Crédit" ? "right" : "left",
+                          color: "#475569", fontWeight: 600, fontSize: 11,
+                          textTransform: "uppercase", letterSpacing: 0.5,
+                          borderBottom: "1px solid #1e293b"
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.ecritures.map((e, i) => (
+                      <tr key={i}>
+                        <td style={{ padding: "10px 12px", fontFamily: "monospace", color: "#a5b4fc", fontWeight: 600 }}>{e.compte}</td>
+                        <td style={{ padding: "10px 12px", color: "#cbd5e1" }}>{e.libelle}</td>
+                        <td style={{ padding: "10px 12px", textAlign: "right", color: e.debit ? "#34d399" : "#1e293b" }}>{e.debit ? formatAmount(e.debit) : "—"}</td>
+                        <td style={{ padding: "10px 12px", textAlign: "right", color: e.credit ? "#f87171" : "#1e293b" }}>{e.credit ? formatAmount(e.credit) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ borderTop: "1px solid #334155" }}>
+                      <td colSpan={2} />
+                      <td style={{ padding: "10px 12px", textAlign: "right", color: "#34d399", fontWeight: 700 }}>{formatAmount(data.ecritures.reduce((s, e) => s + (e.debit || 0), 0))}</td>
+                      <td style={{ padding: "10px 12px", textAlign: "right", color: "#f87171", fontWeight: 700 }}>{formatAmount(data.ecritures.reduce((s, e) => s + (e.credit || 0), 0))}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+                {data.remarques && (
+                  <div style={{ marginTop: 16, padding: "12px 16px", background: "#f59e0b0d", border: "1px solid #f59e0b33", borderRadius: 10, color: "#fbbf24", fontSize: 13 }}>
+                    ⚠️ {data.remarques}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tab === "infos" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                {[
+                  ["Fournisseur", data.fournisseur],
+                  ["N° Facture", data.numero_facture],
+                  ["Date", data.date],
+                  ["Devise", data.devise],
+                  ["Montant HT", formatAmount(data.montant_ht)],
+                  ["TVA", formatAmount(data.tva)],
+                  ["Montant TTC", formatAmount(data.montant_ttc)],
+                  ["Nature", data.nature],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ background: "#1e293b", borderRadius: 10, padding: "14px 16px" }}>
+                    <p style={{ color: "#475569", fontSize: 11, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{k}</p>
+                    <p style={{ color: "#f1f5f9", fontSize: 14, fontWeight: 600 }}>{v}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {tab === "csv" && (
+              <pre style={{
+                background: "#0a0f1e", borderRadius: 10, padding: 16,
+                color: "#94a3b8", fontSize: 12, overflow: "auto",
+                fontFamily: "monospace", lineHeight: 1.6, border: "1px solid #1e293b"
+              }}>{csvContent}</pre>
+            )}
+          </div>
+
+          <div style={{ padding: "16px 24px", borderTop: "1px solid #1e293b", display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <button onClick={downloadCSV} style={{
+              padding: "10px 20px", background: "#6366f1", color: "#fff",
+              border: "none", borderRadius: 10, cursor: "pointer", fontWeight: 600, fontSize: 13
+            }}>⬇ Télécharger CSV</button>
+            <button onClick={copyCSV} style={{
+              padding: "10px 20px", background: "#1e293b", color: "#a5b4fc",
+              border: "1px solid #334155", borderRadius: 10, cursor: "pointer", fontWeight: 600, fontSize: 13
+            }}>{copied ? "✓ Copié !" : "Copier CSV"}</button>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [file, setFile] = useState(null);
+      const [preview, setPreview] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [result, setResult] = useState(null);
+      const [error, setError] = useState(null);
+      const [apiKey, setApiKey] = useState("");
+
+      const handleFile = useCallback((f) => {
+        setFile(f);
+        setResult(null);
+        setError(null);
+        if (f.type.startsWith("image/")) {
+          setPreview(URL.createObjectURL(f));
+        } else {
+          setPreview(null);
+        }
+      }, []);
+
+      const analyze = async () => {
+        if (!file || !apiKey) return;
+        setLoading(true);
+        setError(null);
+        setResult(null);
+
+        try {
+          const base64 = await fileToBase64(file);
+          const isImage = file.type.startsWith("image/");
+          const isPDF = file.type === "application/pdf";
+
+          let messages;
+          if (isImage) {
+            messages = [{ role: "user", content: [
+              { type: "image", source: { type: "base64", media_type: file.type, data: base64 } },
+              { type: "text", text: "Analyse cette facture et génère les écritures comptables selon le format demandé." }
+            ]}];
+          } else if (isPDF) {
+            messages = [{ role: "user", content: [
+              { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+              { type: "text", text: "Analyse cette facture PDF et génère les écritures comptables selon le format demandé." }
+            ]}];
+          } else {
+            throw new Error("Format non supporté. Utilisez un PDF ou une image.");
+          }
+
+          const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              system: SYSTEM_PROMPT,
+              messages,
+            }),
+          });
+
+          const data = await response.json();
+          if (data.error) throw new Error(data.error.message);
+          const text = data.content?.map(b => b.text || "").join("") || "";
+          const clean = text.replace(/```json|```/g, "").trim();
+          setResult(JSON.parse(clean));
+        } catch (err) {
+          setError(err.message || "Erreur lors de l'analyse. Veuillez réessayer.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const reset = () => { setFile(null); setPreview(null); setResult(null); setError(null); };
+
+      return (
+        <div style={{ minHeight: "100vh", background: "#020817", fontFamily: "'IBM Plex Sans', sans-serif", padding: "32px 16px" }}>
+          <div style={{ maxWidth: 760, margin: "0 auto" }}>
+            <div style={{ marginBottom: 36, textAlign: "center" }}>
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 8,
+                background: "#6366f110", border: "1px solid #6366f133",
+                borderRadius: 8, padding: "4px 12px", fontSize: 11,
+                color: "#a5b4fc", marginBottom: 16, letterSpacing: 1
+              }}>◆ ASSISTANT COMPTABLE IA</div>
+              <h1 style={{ fontSize: "clamp(24px, 5vw, 36px)", fontWeight: 700, color: "#f1f5f9", letterSpacing: -1, lineHeight: 1.2 }}>
+                Lecture de factures<br />
+                <span style={{ color: "#6366f1" }}>& écritures automatiques</span>
+              </h1>
+              <p style={{ color: "#475569", fontSize: 14, marginTop: 12 }}>
+                Déposez une facture → l'IA extrait les données et génère les écritures comptables
+              </p>
+            </div>
+
+            <div style={{ background: "#0f172a", borderRadius: 20, border: "1px solid #1e293b", padding: 24, boxShadow: "0 25px 50px -12px #00000080" }}>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ color: "#94a3b8", fontSize: 12, display: "block", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
+                  Clé API Anthropic
+                </label>
+                <input
+                  type="password"
+                  placeholder="sk-ant-..."
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  style={{
+                    width: "100%", padding: "12px 16px",
+                    background: "#1e293b", border: "1px solid #334155",
+                    borderRadius: 10, color: "#f1f5f9", fontSize: 13,
+                    outline: "none", fontFamily: "monospace"
+                  }}
+                />
+              </div>
+
+              <DropZone onFile={handleFile} file={file} />
+
+              {preview && (
+                <div style={{ marginTop: 16, borderRadius: 12, overflow: "hidden", border: "1px solid #1e293b" }}>
+                  <img src={preview} alt="Aperçu" style={{ width: "100%", maxHeight: 300, objectFit: "contain", background: "#1e293b" }} />
+                </div>
+              )}
+
+              <div style={{ marginTop: 16, display: "flex", gap: 12 }}>
+                <button onClick={analyze} disabled={!file || !apiKey || loading} style={{
+                  flex: 1, padding: "14px 24px",
+                  background: file && apiKey && !loading ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "#1e293b",
+                  color: file && apiKey && !loading ? "#fff" : "#334155",
+                  border: "none", borderRadius: 12,
+                  cursor: file && apiKey && !loading ? "pointer" : "not-allowed",
+                  fontWeight: 700, fontSize: 14
+                }}>
+                  {loading ? "Analyse en cours…" : "→ Analyser la facture"}
+                </button>
+                {(file || result) && (
+                  <button onClick={reset} style={{ padding: "14px 18px", background: "#1e293b", color: "#64748b", border: "1px solid #334155", borderRadius: 12, cursor: "pointer", fontSize: 13 }}>✕</button>
+                )}
+              </div>
+
+              {loading && <Loader />}
+
+              {error && (
+                <div style={{ marginTop: 16, padding: "14px 16px", background: "#ef44440d", border: "1px solid #ef444433", borderRadius: 10, color: "#f87171", fontSize: 13 }}>
+                  ⚠️ {error}
+                </div>
+              )}
+            </div>
+
+            {result && <ResultCard data={result} />}
+
+            <p style={{ textAlign: "center", color: "#1e293b", fontSize: 12, marginTop: 32 }}>
+              Prototype · Les écritures sont des suggestions
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
