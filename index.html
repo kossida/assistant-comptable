@@ -302,7 +302,7 @@ Format de réponse attendu :
       const [loading, setLoading] = useState(false);
       const [result, setResult] = useState(null);
       const [error, setError] = useState(null);
-      const [apiKey, setApiKey] = useState("");
+      const [apiKey, setApiKey] = useState(import.meta.env.VITE_ANTHROPIC_KEY || "");
 
       const handleFile = useCallback((f) => {
         setFile(f);
